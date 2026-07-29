@@ -31,7 +31,7 @@ GPIO backend and the `tcp` transport selected, so nothing touches real pins or B
 cd pi
 python3 -m venv .venv                  # Python 3.11+
 .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest -q          # 103 passed
+.venv/bin/python -m pytest -q          # 122 passed
 .venv/bin/python -m ruff check .
 .venv/bin/python -m ruff format --check .
 ```
@@ -105,6 +105,87 @@ Two relays per side, wired as a relay H-bridge (4 channels total). Because each 
 internally break-before-make, no combination of coil states can short V+ to GND —
 shoot-through is physically impossible. Do not substitute an "enable + direction"
 topology, which *can* short if contacts are slow.
+
+### GPIO pin map
+
+Four outputs, one per relay channel. BCM numbering, matching `[gpio.pins]` in
+`pi/config/car.toml` — that file is the source of truth; this diagram follows it.
+
+```
+             Raspberry Pi Zero W — 40-pin header, top view
+             (pin 1 = square pad, nearest the microSD slot)
+
+                    3V3  ( 1) ( 2)  5V
+                  GPIO2  ( 3) ( 4)  5V   ──▶ relay VCC (logic side)
+                  GPIO3  ( 5) ( 6)  GND  ──▶ relay GND (logic side)
+                  GPIO4  ( 7) ( 8)  GPIO14
+                    GND  ( 9) (10)  GPIO15
+                 GPIO17  (11) (12)  GPIO18
+                 GPIO27  (13) (14)  GND
+                 GPIO22  (15) (16)  GPIO23
+                    3V3  (17) (18)  GPIO24
+                 GPIO10  (19) (20)  GND
+                  GPIO9  (21) (22)  GPIO25
+                 GPIO11  (23) (24)  GPIO8
+                    GND  (25) (26)  GPIO7
+                  GPIO0  (27) (28)  GPIO1
+    left_a  ◀──   GPIO5  (29) (30)  GND
+    left_b  ◀──   GPIO6  (31) (32)  GPIO12
+   right_a  ◀──  GPIO13  (33) (34)  GND
+   right_b  ◀──  GPIO19  (35) (36)  GPIO16
+                 GPIO26  (37) (38)  GPIO20
+                    GND  (39) (40)  GPIO21
+```
+
+| `car.toml` key | BCM | Header pin | Relay ch. | Energized ⇒ |
+|---|---|---|---|---|
+| `left_a`  | 5  | 29 | IN1 | left side FORWARD |
+| `left_b`  | 6  | 31 | IN2 | left side REVERSE |
+| `right_a` | 13 | 33 | IN3 | right side FORWARD |
+| `right_b` | 19 | 35 | IN4 | right side REVERSE |
+
+The four signals sit together on pins 29–35, with GND on 30/34 for a short return path.
+Nothing else on the header is used — no I²C, SPI, or UART — so pins 1–28 stay free.
+
+The `IN1`–`IN4` column is convention, not a constraint: the software only knows the four
+BCM numbers. Any channel order works as long as the physical wiring matches `car.toml`.
+
+**Levels are inverted.** `active_low = true`: the Pi drives a pin **LOW** to energize that
+channel's coil. HIGH, floating, and unpowered all mean coil off. Read §2.3 of
+ARCHITECTURE.md before changing this — it is what makes the boot-float state safe.
+
+Per-side truth table (ARCHITECTURE.md §2.1). Both coils on is also a brake, but the
+software never commands it:
+
+| `_a` | `_b` | Motor terminals | Side state |
+|---|---|---|---|
+| off | off | GND / GND | **STOP** (shorted = dynamic brake) |
+| on  | off | V+ / GND  | FORWARD (`+1`) |
+| off | on  | GND / V+  | REVERSE (`-1`) |
+
+### Power domains
+
+Two rails that share only ground. This is the whole point of the opto-isolated board:
+
+```
+  LOGIC SIDE                          │  MOTOR SIDE
+  (Pi's own 5V supply)                │  (lithium pack)
+                                      │
+  Pi 5V   (pin 2 or 4)  ──▶ VCC       │  pack V+       ──▶ relay COM/NO/NC
+  Pi GND  (pin 6)       ──▶ GND       │  pack 5V reg.  ──▶ JD-VCC
+  BCM 5   (pin 29)      ──▶ IN1       │  pack GND      ──▶ board GND
+  BCM 6   (pin 31)      ──▶ IN2       │
+  BCM 13  (pin 33)      ──▶ IN3       │  contacts      ──▶ motors
+  BCM 19  (pin 35)      ──▶ IN4       │
+                                      │
+        opto LEDs ───────── isolation barrier ───────── coils + contacts
+                                      │
+              the two sides share GND and nothing else
+```
+
+Snubber each motor across its terminals with a bidirectional TVS or an RC network
+(100 nF + 100 Ω) — **not** a plain flyback diode. Polarity reverses on this topology, so a
+single diode is wrong in one of the two directions.
 
 Three things that will bite you, in full in ARCHITECTURE.md §2:
 

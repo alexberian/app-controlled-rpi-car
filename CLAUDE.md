@@ -26,31 +26,54 @@ file layout, and the reasoning behind each. This file is only the short version.
 
 ## Keeping the docs true
 
-`docs/HANDOFF.md` is the "where were we" document, and the next agent starts from it
-having seen none of your reasoning. **Before you finish a change to code, update it if the
-change made anything in it wrong.** Do not defer this to the end of a larger task or to
-the next session — a stale handoff has already sent one agent to rebuild a module that
-was finished.
+Three docs, three jobs. Updating them is part of finishing a change, not cleanup after it.
+
+| Doc | Job | Edit it when |
+|---|---|---|
+| `docs/ARCHITECTURE.md` | the design; leads the code | you deliberately change designed behaviour |
+| `docs/HANDOFF.md` | "where were we": present state + traps | a change made anything in it wrong |
+| `README.md` | orientation for a human | setup, status, or hardware facts changed |
+
+### HANDOFF.md
+
+The next agent starts here having seen none of your reasoning. **Update it before you
+finish the change** — not at the end of a larger task, not next session. A stale handoff
+has already sent one agent to rebuild a module that was done.
 
 Check all of it, not just the checklist:
 
+- **Header date** — bump "Last updated" and name what landed.
 - **Status and the file tree** — a module that went from missing to DONE, or DONE to
   UNTESTED-ON-HW.
 - **The verify block** — the expected test count is written down; if you added tests,
   change the number.
-- **"What is left"** — delete what you finished and renumber. If you discovered work that
-  is not listed, add it in dependency order.
-- **"Things that will bite you"** — the highest-value section. If something cost you more
-  than a few minutes, or you made a non-obvious call a reader would otherwise try to
-  "fix", write it down with the reasoning.
+- **"What is left"** — delete what you finished and renumber. Add work you discovered, in
+  dependency order.
+- **"Things that will bite you"** — the highest-value section. Anything that cost you more
+  than a few minutes, or a non-obvious call a reader would otherwise try to "fix", goes
+  here *with the reasoning*. Add to it; don't rewrite entries that are still true.
+- **"Open questions"** — if the owner answered one, delete it here and in ARCHITECTURE §10.
 
-`docs/ARCHITECTURE.md` is different: it is the design, it leads the code, and a
-disagreement between the two is a code bug **unless the doc was updated in the same
-change**. So if you deliberately change a designed behaviour — an invariant, the wire
-format, the layering, a topology — edit ARCHITECTURE.md in that same change. Two section 6
-invariants have already been refined this way. Otherwise leave it alone.
+Keep it a snapshot, not a changelog: current state and live traps, no history of who did
+what. Absolute dates (`2026-07-29`), never "last week".
 
-If a change touches neither, say so rather than editing to look diligent.
+### ARCHITECTURE.md
+
+It leads the code — a disagreement between the two is a **code bug** unless the doc was
+updated in the same change. So edit it only when you deliberately change a designed
+behaviour (a §6 invariant, the wire format, the layering, a topology), and do it in that
+same change. Two §6 invariants have already been refined this way. Otherwise leave it alone.
+
+### README.md
+
+Orientation, not a second handoff. It carries the test count, the status table, the pin map,
+and the hardware warnings — all of which go stale. Keep it consistent with `car.toml` and
+with HANDOFF's verify block; link to ARCHITECTURE.md rather than restating it.
+
+### Always
+
+Say which docs you touched and why — or that the change needed none. Never edit a doc to
+look diligent.
 
 ## Testing
 
