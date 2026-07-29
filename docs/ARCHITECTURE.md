@@ -154,6 +154,21 @@ Rationale:
 `transport/base.py` defines the interface so BLE can be added as a peer implementation.
 Nothing above the transport layer may import a transport-specific symbol.
 
+The interface is a **`Session` of three synchronous callbacks** — `on_connect`, `on_line`,
+`on_disconnect`. Synchronous because the governor's `command()` is, and because a handler
+that cannot await cannot let a disconnect overtake the last command that arrived before
+it. The transport guarantees `on_disconnect` runs *before* it closes the socket, which is
+what makes §6.2 an enforceable property of the link layer rather than an aspiration.
+
+The transport also owns **line splitting and buffer bounding**. `MAX_LINE_BYTES` can only
+be checked once a whole line exists, so a peer that never sends a newline is a memory bug
+unless the read buffer is capped at the same limit and the over-long line dropped there.
+
+**One client at a time.** A connection attempt while another client is driving is refused
+— closed immediately, no session, the existing link untouched. Two clients heartbeating at
+10Hz would fight over the relays, and the watchdog cannot distinguish that from a healthy
+link. This is a policy of the transport layer, so it holds for TCP and SPP alike.
+
 A `tcp.py` transport ships alongside it. It speaks the identical protocol over WiFi and
 exists so the entire stack — protocol, safety, drive, GPIO — can be exercised from a
 development machine without touching BlueZ. Bring up TCP first, always.
@@ -209,7 +224,8 @@ intervening (dead-time, dwell limit). The app should render actual, not commande
 
 ### 5.3 Rules
 
-- Max line length 256 bytes. Longer → drop the line, log, do not disconnect.
+- Max line length 256 bytes. Longer → drop the line, log, do not disconnect. Enforced
+  twice: by the transport's read buffer (§4) and by the codec on the assembled line.
 - Malformed JSON or unknown `t` → ignore that line, keep the connection. A single bad
   frame must never take down the link mid-drive.
 - Unknown fields are ignored, so the protocol can grow without a version bump.

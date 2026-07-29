@@ -1,6 +1,6 @@
 # Handoff — state of the build
 
-Written 2026-07-26. Last updated 2026-07-29. Update this file when you finish a chunk; it
+Written 2026-07-26. Last updated 2026-07-29 (TCP transport landed). Update this file when you finish a chunk; it
 is the "where were we" document. `ARCHITECTURE.md` is the design and does not change often
 — this one does.
 
@@ -10,9 +10,11 @@ is the "where were we" document. `ARCHITECTURE.md` is the design and does not ch
 
 ## Where things stand
 
-The Pi service's safety-critical core and its wire codec are **complete, tested, and
-lint-clean**. Nothing talks to a network or a Bluetooth stack yet — `protocol.py` is handed
-lines by a caller that does not exist.
+The Pi service's safety-critical core, its wire codec, and the **TCP link layer** are
+complete, tested, and lint-clean. The stack now runs end to end over a real socket — but
+only when something wires it together, and that something (`__main__.py`) does not exist
+yet. `tests/test_transport.py::DriveSession` is a working 20-line stand-in for it; start
+from that.
 
 ```
 rpi-car/
@@ -28,23 +30,28 @@ rpi-car/
     │   ├── drive.py        SideState/DriveState + H-bridge truth map DONE
     │   ├── safety.py       watchdog / dead-time / dwell governor     DONE
     │   ├── protocol.py     NDJSON codec, SeqTracker                  DONE
-    │   └── gpio/
-    │       ├── base.py         RelayBank ABC, CoilStates             DONE
-    │       ├── mock_backend.py records transitions, used by all tests DONE
-    │       ├── lgpio_backend.py real hardware                        DONE, UNTESTED ON HW
-    │       └── __init__.py     create_relay_bank() factory           DONE
+    │   ├── gpio/
+    │   │   ├── base.py         RelayBank ABC, CoilStates             DONE
+    │   │   ├── mock_backend.py records transitions, used by all tests DONE
+    │   │   ├── lgpio_backend.py real hardware                        DONE, UNTESTED ON HW
+    │   │   └── __init__.py     create_relay_bank() factory           DONE
+    │   └── transport/
+    │       ├── base.py         Session/Connection/Transport, framing DONE
+    │       ├── tcp.py          dev + WiFi listener                   DONE
+    │       └── __init__.py     create_transport() factory            DONE
     └── tests/
         ├── conftest.py     FakeClock, Rig, FailingRelayBank
         ├── test_drive.py       28 tests
         ├── test_safety.py      19 tests — one per ARCHITECTURE.md section 6 invariant
-        └── test_protocol.py    56 tests
+        ├── test_protocol.py    56 tests
+        └── test_transport.py   19 tests — real loopback sockets, not a fake stream
 ```
 
 Verify with:
 
 ```bash
 cd pi
-.venv/bin/python -m pytest -q          # expect: 103 passed
+.venv/bin/python -m pytest -q          # expect: 122 passed
 .venv/bin/python -m ruff check .
 .venv/bin/python -m ruff format --check .
 ```
@@ -60,24 +67,7 @@ is tracked; `*.local.toml` is ignored for per-machine overrides.
 
 Do them in this order. Each depends on the one before it.
 
-### 1. `transport/base.py` + `transport/tcp.py`
-
-Async line-oriented byte stream. The interface needs a disconnect notification, because
-`SafetyGovernor.on_disconnect()` must run **synchronously before socket teardown**
-(`ARCHITECTURE.md` 6.2). Do not make that a fire-and-forget task.
-
-The transport owns line splitting and hands whole lines to `decode_line`. Note that
-`MAX_LINE_BYTES` is checked *after* a line exists, so the transport must bound its own read
-buffer as well — a peer that never sends a newline would otherwise buffer without limit.
-`asyncio.StreamReader.readuntil` takes a `limit` and raises `LimitOverrunError`; catch it,
-discard to the next newline, and keep the connection.
-
-Call `SeqTracker.reset()` on disconnect. The next client starts its own numbering and a
-retained position would reject everything it sends until it happened to pass us.
-
-TCP exists so the whole stack runs on a laptop. Build and prove it before touching BlueZ.
-
-### 2. `telemetry.py` + `__main__.py`
+### 1. `telemetry.py` + `__main__.py`
 
 Telemetry: 2 Hz periodic state frames, plus an immediate frame on any change or fault.
 Send `gov.applied` (what the relays are doing), **not** `gov.target` — the app renders
@@ -86,22 +76,35 @@ takes `applied`, `ack`, `uptime_s`, and `err`; fill `ack` from `SeqTracker.last`
 from `GateReason.as_wire()`, which exists and is still called by nothing.
 
 `__main__.py` assembles config → `create_relay_bank` → `DriveController` →
-`SafetyGovernor` → protocol → transport, and installs SIGTERM/SIGINT handlers.
+`SafetyGovernor` → `create_transport`, and installs SIGTERM/SIGINT handlers.
 `SafetyGovernor.run()` already stops the car in its `finally`, so the handler mainly needs
 to cancel the task and let it unwind.
+
+The missing piece between protocol and transport is the `Session` object: `on_connect`,
+`on_line`, `on_disconnect`, all synchronous. `DriveSession` in `tests/test_transport.py`
+is that object, working, minus telemetry — lift it into `src/` rather than reinventing it,
+and keep its `decode_line` → `SeqTracker.accept` → `gov.command` ordering, which is what
+keeps a garbage line from feeding the watchdog. Telemetry hangs off `on_connect`, which
+hands you the `Connection` to send on.
 
 `pyproject.toml` already declares the `rpicar` console script pointing at
 `rpicar.__main__:main`. Until this lands, an editable install succeeds and the `rpicar`
 command fails at runtime.
 
-### 3. `transport/spp.py`
+### 2. `transport/spp.py`
 
 RFCOMM listener plus a D-Bus SDP record. Details and the reasoning are in
 `ARCHITECTURE.md` section 4.1. The trap: a raw bound `AF_BLUETOOTH` socket publishes no
 SDP record, and Android's `createRfcommSocketToServiceRecord` needs one to find the
 channel. Register via `org.bluez.ProfileManager1.RegisterProfile`, not `sdptool`.
 
-### 4. `scripts/` + `systemd/rpicar.service`
+Only the listener is new work: subclass `Transport`, accept one RFCOMM socket at a time,
+wrap it with `loop.connect_accepted_socket` into a stream pair, and hand it to
+`StreamConnection` + `run_session`. All the framing, bounding, and disconnect ordering is
+already written and tested in `transport/base.py`. `create_transport` already dispatches to
+`SppTransport`; until the module exists, `kind = "spp"` fails with `ModuleNotFoundError`.
+
+### 3. `scripts/` + `systemd/rpicar.service`
 
 `setup_bluetooth.sh` (NoInputNoOutput agent, pairable, adapter alias from `car.name`),
 `install.sh` (venv + unit install), and the unit itself with a restart policy.
@@ -116,6 +119,36 @@ Then `android/`, which has not been started.
 code bug unless the doc was updated in the same change. Two invariants in section 6 were
 already refined during implementation for exactly this reason — if you find a third, edit
 the doc too.
+
+**Do not use `Server.serve_forever()` in a transport.** This cost an hour. Its cancellation
+path calls `await Server.wait_closed()`, and since Python 3.12.1 that waits for the
+connection handler tasks to finish — but the handler is exactly what the transport's own
+`finally` has not cancelled yet, because it never gets to run. Shutdown deadlocks with the
+client still connected and the disconnect never reported. `tcp.py` therefore idles on
+`asyncio.Event().wait()` and owns the teardown itself: close the listener, cancel the
+handler, wait for it. `start_server` is already accepting by the time it returns, so
+nothing is lost.
+
+**`readuntil` leaves the buffer untouched when it overruns the limit.** Catching
+`LimitOverrunError` and continuing gets you the same exception forever on the same bytes.
+The consumed count has to be read off the exception and drained explicitly — that is what
+`StreamConnection._discard_line` is doing, and both overrun cases (no separator yet,
+separator found beyond the limit) go through it.
+
+**`Session`'s three callbacks are synchronous, and that is the design.** `on_disconnect`
+runs inside the `finally` that owns the socket close, which is the whole mechanism behind
+ARCHITECTURE.md 6.2 — the coils are de-energized before the peer is gone. Make any of them
+`async`, or schedule the stop as a task, and the guarantee silently becomes "eventually".
+It is also why cancellation is safe: there may be no chance to run a scheduled task.
+
+**After a reset (RST), the connection is already closed when `on_disconnect` fires.** Only
+the graceful path can promise otherwise, so do not assert on socket state there — assert
+that the stop happened. `test_a_reset_connection_is_a_disconnect_not_a_crash` covers it.
+
+**`TcpConfig` forbids port 0**, so a test cannot let the listener pick its own port. The
+harness binds an ephemeral port, closes it, and hands the number over; `serve()` also binds
+inside its own task, so a test client has to retry the connect rather than assume the
+listener exists. Both are in `tests/test_transport.py`'s harness — reuse it.
 
 **`safety.py` is a synchronous state machine (`tick`) wrapped in a trivial async loop
 (`run`).** Keep it that way. All time comes from an injected clock, which is why the tests
