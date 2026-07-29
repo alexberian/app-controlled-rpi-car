@@ -1,0 +1,64 @@
+# rpi-car configuration.
+#
+# Every tunable in the system lives here. If you find a timing or a pin number
+# hardcoded in src/, that is a bug -- see docs/ARCHITECTURE.md section 8.
+
+[car]
+# Bluetooth adapter alias. The Android app matches bonded devices on this name.
+name = "rpi-car"
+
+[transport]
+# "tcp" for development on a laptop or over WiFi, "spp" for Bluetooth RFCOMM.
+# Bring-up order is ARCHITECTURE.md section 9: prove tcp before touching spp.
+kind = "tcp"
+
+[transport.tcp]
+host = "0.0.0.0"
+port = 9999
+
+[transport.spp]
+# RFCOMM channel published in the SDP record. 1 is conventional for SPP.
+channel = 1
+
+[gpio]
+# "mock" records transitions in memory, "lgpio" drives real pins.
+backend = "mock"
+# gpiochip number. 0 on Pi Zero W / Pi OS Bookworm.
+chip = 0
+# true for opto-isolated relay boards, where pulling the input LOW energizes
+# the coil. This is also what makes the boot-float state safe -- see
+# ARCHITECTURE.md section 2.3. Do not change without re-reading that section.
+active_low = true
+
+[gpio.pins]
+# BCM numbering. Two relays per side wired as a relay H-bridge:
+#   A energized -> that side forward
+#   B energized -> that side reverse
+#   neither     -> both motor terminals to GND (braked)
+# The topology cannot short V+ to GND for any coil combination. See
+# ARCHITECTURE.md section 2.1 before rewiring.
+left_a = 5
+left_b = 6
+right_a = 13
+right_b = 19
+
+[safety]
+# No valid drive frame within this window forces STOP. This is what stops the
+# car when the operator walks out of Bluetooth range.
+watchdog_ms = 500
+# Forced STOP inserted between FORWARD and REVERSE on a side. Contacts must not
+# close on a motor still spinning the other way.
+reversal_dead_time_ms = 250
+# Minimum time a side must hold a state before it may change again. Protects a
+# finite relay contact budget from a jittery thumb at the command rate.
+min_dwell_ms = 80
+
+[telemetry]
+# Periodic state frames back to the app. Changes and faults are sent
+# immediately regardless of this rate.
+state_hz = 2.0
+
+[control]
+# Rate the app is expected to send heartbeat frames at. Must stay comfortably
+# above 1000/watchdog_ms or the watchdog will trip on normal operation.
+command_hz = 10.0
