@@ -6,8 +6,7 @@ Bluetooth-controlled Raspberry Pi Zero W car + custom Android app.
 authoritative design document — hardware topology, wire protocol, safety invariants,
 file layout, and the reasoning behind each. This file is only the short version.
 
-**Then read `docs/HANDOFF.md`** for what is built, what is next, and the traps. Update
-it when you finish a chunk.
+**Then read `docs/HANDOFF.md`** for what is built, what is next, and the traps.
 
 ## Hard rules
 
@@ -23,6 +22,35 @@ it when you finish a chunk.
   `drive.py` must not know Bluetooth exists; `safety.py` must not know JSON exists.
 - **Tunables live in `pi/config/car.toml`**, never inline. Pins are BCM numbering.
 - Python 3.11+, asyncio, `lgpio` for GPIO (not RPi.GPIO — broken on Bookworm).
+- **Leave the docs true.** See below — this is a rule, not housekeeping.
+
+## Keeping the docs true
+
+`docs/HANDOFF.md` is the "where were we" document, and the next agent starts from it
+having seen none of your reasoning. **Before you finish a change to code, update it if the
+change made anything in it wrong.** Do not defer this to the end of a larger task or to
+the next session — a stale handoff has already sent one agent to rebuild a module that
+was finished.
+
+Check all of it, not just the checklist:
+
+- **Status and the file tree** — a module that went from missing to DONE, or DONE to
+  UNTESTED-ON-HW.
+- **The verify block** — the expected test count is written down; if you added tests,
+  change the number.
+- **"What is left"** — delete what you finished and renumber. If you discovered work that
+  is not listed, add it in dependency order.
+- **"Things that will bite you"** — the highest-value section. If something cost you more
+  than a few minutes, or you made a non-obvious call a reader would otherwise try to
+  "fix", write it down with the reasoning.
+
+`docs/ARCHITECTURE.md` is different: it is the design, it leads the code, and a
+disagreement between the two is a code bug **unless the doc was updated in the same
+change**. So if you deliberately change a designed behaviour — an invariant, the wire
+format, the layering, a topology — edit ARCHITECTURE.md in that same change. Two section 6
+invariants have already been refined this way. Otherwise leave it alone.
+
+If a change touches neither, say so rather than editing to look diligent.
 
 ## Testing
 
