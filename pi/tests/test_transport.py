@@ -24,9 +24,11 @@ from dataclasses import dataclass, field
 import pytest
 
 from conftest import Rig
-from rpicar.config import TcpConfig
+from rpicar.config import TcpConfig, TelemetryConfig
 from rpicar.drive import SideState
-from rpicar.protocol import MAX_LINE_BYTES, SeqTracker, decode_line
+from rpicar.protocol import MAX_LINE_BYTES, decode_line
+from rpicar.session import DriveSession
+from rpicar.telemetry import TelemetryPublisher
 from rpicar.transport import Connection, TcpTransport, TransportError
 
 # Every await in here is on loopback against a service in the same event loop,
@@ -62,34 +64,15 @@ class RecordingSession:
         self.open_at_disconnect.append(not self.connects[-1].closed)
 
 
-class DriveSession:
-    """The real stack behind a socket: decode, order, gate, actuate.
+def drive_session(rig: Rig) -> DriveSession:
+    """The shipped session, wired to the test rig.
 
-    A stand-in for the session module that ``__main__.py`` will own. It is here
-    so at least one test proves the layering actually composes over a socket
-    rather than only in the abstract.
+    Deliberately the real ``rpicar.session.DriveSession`` rather than a stand-in:
+    these three tests are the only place the whole stack is exercised over an
+    actual socket, so a copy of the logic here would prove nothing about the code
+    that runs on the car -- and would drift.
     """
-
-    def __init__(self, rig: Rig) -> None:
-        self.rig = rig
-        self.seq = SeqTracker()
-        self.connection: Connection | None = None
-
-    def on_connect(self, connection: Connection) -> None:
-        self.connection = connection
-
-    def on_line(self, line: bytes) -> None:
-        command = decode_line(line)
-        # A `None` here means "nothing happened" and must not touch the
-        # watchdog in either direction.
-        if command is None or not self.seq.accept(command.seq):
-            return
-        self.rig.gov.command(command.left, command.right, command.seq)
-        self.rig.gov.tick()
-
-    def on_disconnect(self, reason: str) -> None:
-        self.rig.gov.on_disconnect(reason)
-        self.seq.reset()
+    return DriveSession(rig.gov, TelemetryPublisher(rig.gov, TelemetryConfig(state_hz=2.0)))
 
 
 @dataclass
@@ -456,7 +439,7 @@ async def test_a_busy_port_fails_loudly() -> None:
 
 @pytest.mark.asyncio
 async def test_a_drive_frame_over_a_socket_moves_the_relays(rig: Rig) -> None:
-    session = DriveSession(rig)
+    session = drive_session(rig)
     async with serving(session) as harness, client(harness.port) as (_, writer):
         writer.write(frame(l=1, r=-1, seq=1))
         await writer.drain()
@@ -470,7 +453,7 @@ async def test_a_drive_frame_over_a_socket_moves_the_relays(rig: Rig) -> None:
 
 @pytest.mark.asyncio
 async def test_garbage_never_reaches_the_governor(rig: Rig) -> None:
-    session = DriveSession(rig)
+    session = drive_session(rig)
     async with serving(session) as harness, client(harness.port) as (_, writer):
         writer.write(b"not json\n")
         writer.write(b'{"t":"hello"}\n')
@@ -491,7 +474,7 @@ async def test_garbage_never_reaches_the_governor(rig: Rig) -> None:
 @pytest.mark.asyncio
 async def test_the_car_stops_when_the_client_disappears(rig: Rig) -> None:
     """The disconnect path end to end: socket gone, coils de-energized."""
-    session = DriveSession(rig)
+    session = drive_session(rig)
     async with serving(session) as harness:
         async with client(harness.port) as (_, writer):
             writer.write(frame(l=1, r=1, seq=1))

@@ -15,6 +15,7 @@ from rpicar.config import SafetyConfig
 from rpicar.drive import DriveController, DriveState, SideState
 from rpicar.gpio import CoilStates, GpioError, MockRelayBank, RelayBank
 from rpicar.safety import SafetyGovernor
+from rpicar.transport import Connection
 
 
 class FailingRelayBank(RelayBank):
@@ -37,6 +38,35 @@ class FailingRelayBank(RelayBank):
         self.writes += 1
         if self.writes > self.fail_after:
             raise GpioError("simulated write failure")
+
+
+class FakeConnection(Connection):
+    """A :class:`Connection` that only records what was sent to it.
+
+    Shared by the telemetry and session tests. ``closed=True`` stands in for a
+    link that has already gone away, which must silently drop sends rather than
+    raise -- the read loop is the authority on disconnection.
+    """
+
+    def __init__(self, closed: bool = False) -> None:
+        self.sent: list[bytes] = []
+        self._closed = closed
+
+    @property
+    def peer(self) -> str:
+        return "fake"
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    async def send(self, data: bytes) -> None:
+        if self._closed:
+            return
+        self.sent.append(data)
+
+    def close(self) -> None:
+        self._closed = True
 
 
 class FakeClock:

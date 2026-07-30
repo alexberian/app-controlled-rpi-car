@@ -138,6 +138,7 @@ the last moment.
 ## 4. Transport decision
 
 **Chosen: Bluetooth Classic SPP (RFCOMM), channel 1, UUID `00001101-0000-1000-8000-00805F9B34FB`.**
+Confirmed by the owner 2026-07-29, before any Android connection-layer work. Settled.
 
 Rationale:
 - Android's `BluetoothDevice.createRfcommSocketToServiceRecord()` gives a plain
@@ -299,6 +300,7 @@ rpi-car/
 │   │   ├── __main__.py             # entrypoint: wire everything, signal handlers
 │   │   ├── config.py               # load + validate car.toml -> frozen dataclass
 │   │   ├── protocol.py             # encode/decode NDJSON, seq handling
+│   │   ├── session.py              # Session impl: decoded frame -> command  [§7.1]
 │   │   ├── safety.py               # watchdog, dead-time, dwell limiter  [§6]
 │   │   ├── drive.py                # DriveController: (l,r) -> relay bank states
 │   │   ├── telemetry.py            # periodic state frames
@@ -327,6 +329,18 @@ transport (bytes)  ->  protocol (frames)  ->  safety (gated states)  ->  drive  
 Dependencies point one direction only. `drive.py` must not know that Bluetooth exists;
 `safety.py` must not know what JSON is. This is what makes the mock backend and the TCP
 transport useful rather than ceremonial.
+
+Two modules sit across that chain rather than in it, and both depend downward only:
+
+- **`session.py`** implements the transport's `Session` and is the *only* place that knows
+  both that lines are JSON and that a car is attached. It is what stops `protocol.py`
+  needing a governor and `safety.py` needing a decoder. Its three callbacks are
+  synchronous, which is what makes §6.2 enforceable — see §4.
+- **`telemetry.py`** reads the governor's applied state and encodes it for the wire. It
+  *polls* the governor rather than being called back by it, so the dependency still points
+  `telemetry -> safety` and the safety layer holds no reference to it.
+
+`__main__.py` is the only module allowed to know about all of them at once.
 
 ---
 
@@ -362,9 +376,6 @@ there costs a debugging session instead of a wall.
 
 ## 10. Open items
 
-- **Transport was chosen without owner sign-off** (§4). SPP is the right default for
-  Android-only auto-connect, but it is the one architectural call made unilaterally.
-  Revisit before the Android app's connection layer is written.
 - Battery chemistry unconfirmed (§2.2) — blocks regulator and coil-rail sizing.
 - Relay channel count unconfirmed. Design assumes 4 (two per side).
 - No battery telemetry in v1. The `state` frame has room for it; ADC hardware would be

@@ -1,6 +1,8 @@
 # Handoff — state of the build
 
-Written 2026-07-26. Last updated 2026-07-29 (TCP transport landed). Update this file when you finish a chunk; it
+Written 2026-07-26. Last updated 2026-07-29 (the service runs: `telemetry.py`, `session.py`
+and `__main__.py` landed on top of the TCP transport; SPP confirmed by the owner — §4 is
+settled). Update this file when you finish a chunk; it
 is the "where were we" document. `ARCHITECTURE.md` is the design and does not change often
 — this one does.
 
@@ -10,11 +12,27 @@ is the "where were we" document. `ARCHITECTURE.md` is the design and does not ch
 
 ## Where things stand
 
-The Pi service's safety-critical core, its wire codec, and the **TCP link layer** are
-complete, tested, and lint-clean. The stack now runs end to end over a real socket — but
-only when something wires it together, and that something (`__main__.py`) does not exist
-yet. `tests/test_transport.py::DriveSession` is a working 20-line stand-in for it; start
-from that.
+**The service runs.** Over TCP, against the mock backend, a client can drive the car and
+watch the relays in telemetry — bring-up step 1 of `ARCHITECTURE.md` section 9 is done.
+Everything is tested and lint-clean.
+
+```bash
+cd pi
+.venv/bin/python -m rpicar                 # or: .venv/bin/rpicar
+```
+
+That listens on `0.0.0.0:9999` per `config/car.toml`. Point anything line-oriented at it:
+`{"t":"drive","l":1,"r":-1,"seq":1}` per line at 10Hz, and it replies with `state` frames.
+Stop it with Ctrl-C or SIGTERM; both leave the relays de-energized.
+
+What has been verified by hand, not just by the suite: forward / spin / reverse with the
+dead-time gate visible in `err`, garbage frames ignored without dropping the link, the
+watchdog tripping ~500ms after the client goes silent, a second client refused while the
+first drives, clean exit on SIGTERM and SIGINT, exit 2 on a bad config, and exit 1 with the
+relays still driven off when the port is already bound.
+
+**What is not built: `transport/spp.py`.** Bluetooth is the whole premise and it is the next
+thing. `kind = "spp"` in `car.toml` currently fails with `ModuleNotFoundError`.
 
 ```
 rpi-car/
@@ -26,10 +44,13 @@ rpi-car/
     ├── config/car.toml     every tunable in the system, heavily commented
     ├── src/rpicar/
     │   ├── __init__.py
+    │   ├── __main__.py     assembles + supervises the stack, signals  DONE
     │   ├── config.py       TOML -> validated frozen dataclasses      DONE
     │   ├── drive.py        SideState/DriveState + H-bridge truth map DONE
     │   ├── safety.py       watchdog / dead-time / dwell governor     DONE
     │   ├── protocol.py     NDJSON codec, SeqTracker                  DONE
+    │   ├── session.py      DriveSession: frame -> command            DONE
+    │   ├── telemetry.py    TelemetryPublisher, 2Hz + on-change       DONE
     │   ├── gpio/
     │   │   ├── base.py         RelayBank ABC, CoilStates             DONE
     │   │   ├── mock_backend.py records transitions, used by all tests DONE
@@ -40,26 +61,34 @@ rpi-car/
     │       ├── tcp.py          dev + WiFi listener                   DONE
     │       └── __init__.py     create_transport() factory            DONE
     └── tests/
-        ├── conftest.py     FakeClock, Rig, FailingRelayBank
+        ├── conftest.py     FakeClock, FakeConnection, Rig, FailingRelayBank
         ├── test_drive.py       28 tests
         ├── test_safety.py      19 tests — one per ARCHITECTURE.md section 6 invariant
         ├── test_protocol.py    56 tests
-        └── test_transport.py   19 tests — real loopback sockets, not a fake stream
+        ├── test_transport.py   19 tests — real loopback sockets, not a fake stream
+        ├── test_telemetry.py   30 tests — fake clock; 2 async ones cover run()
+        └── test_session.py     25 tests — mostly "what is not a heartbeat"
 ```
+
+`__main__.py` has no unit tests. It is assembly plus a supervisor, and the things worth
+asserting about it (safe start before accept, stop before socket teardown, clean signal
+exit) are either already covered by `test_safety.py` / `test_transport.py` or need a real
+process — see the manual list above, which is the actual coverage.
 
 Verify with:
 
 ```bash
 cd pi
-.venv/bin/python -m pytest -q          # expect: 122 passed
+.venv/bin/python -m pytest -q          # expect: 177 passed
 .venv/bin/python -m ruff check .
 .venv/bin/python -m ruff format --check .
 ```
 
 If those three are not clean, fix that before doing anything else.
 
-The repo was initialised on 2026-07-29 (branch `main`, one commit, no remote). `car.toml`
-is tracked; `*.local.toml` is ignored for per-machine overrides.
+The repo was initialised on 2026-07-29. `main` tracks
+`git@github.com:alexberian/app-controlled-rpi-car.git`. `car.toml` is tracked;
+`*.local.toml` is ignored for per-machine overrides.
 
 ---
 
@@ -67,31 +96,7 @@ is tracked; `*.local.toml` is ignored for per-machine overrides.
 
 Do them in this order. Each depends on the one before it.
 
-### 1. `telemetry.py` + `__main__.py`
-
-Telemetry: 2 Hz periodic state frames, plus an immediate frame on any change or fault.
-Send `gov.applied` (what the relays are doing), **not** `gov.target` — the app renders
-actual state, and they legitimately diverge while a gate is active. `encode_state` already
-takes `applied`, `ack`, `uptime_s`, and `err`; fill `ack` from `SeqTracker.last` and `err`
-from `GateReason.as_wire()`, which exists and is still called by nothing.
-
-`__main__.py` assembles config → `create_relay_bank` → `DriveController` →
-`SafetyGovernor` → `create_transport`, and installs SIGTERM/SIGINT handlers.
-`SafetyGovernor.run()` already stops the car in its `finally`, so the handler mainly needs
-to cancel the task and let it unwind.
-
-The missing piece between protocol and transport is the `Session` object: `on_connect`,
-`on_line`, `on_disconnect`, all synchronous. `DriveSession` in `tests/test_transport.py`
-is that object, working, minus telemetry — lift it into `src/` rather than reinventing it,
-and keep its `decode_line` → `SeqTracker.accept` → `gov.command` ordering, which is what
-keeps a garbage line from feeding the watchdog. Telemetry hangs off `on_connect`, which
-hands you the `Connection` to send on.
-
-`pyproject.toml` already declares the `rpicar` console script pointing at
-`rpicar.__main__:main`. Until this lands, an editable install succeeds and the `rpicar`
-command fails at runtime.
-
-### 2. `transport/spp.py`
+### 1. `transport/spp.py`
 
 RFCOMM listener plus a D-Bus SDP record. Details and the reasoning are in
 `ARCHITECTURE.md` section 4.1. The trap: a raw bound `AF_BLUETOOTH` socket publishes no
@@ -104,12 +109,28 @@ wrap it with `loop.connect_accepted_socket` into a stream pair, and hand it to
 already written and tested in `transport/base.py`. `create_transport` already dispatches to
 `SppTransport`; until the module exists, `kind = "spp"` fails with `ModuleNotFoundError`.
 
-### 3. `scripts/` + `systemd/rpicar.service`
+Nothing above the transport needs to change: `__main__.py` builds whatever
+`create_transport` returns, so switching `kind` in `car.toml` is the whole integration.
+
+### 2. `scripts/` + `systemd/rpicar.service`
 
 `setup_bluetooth.sh` (NoInputNoOutput agent, pairable, adapter alias from `car.name`),
 `install.sh` (venv + unit install), and the unit itself with a restart policy.
 
-Then `android/`, which has not been started.
+For the unit: the service exits **2** for a bad config, **1** for a runtime failure, **0**
+on a signal. Restarting will never fix a 2 — `RestartPreventExitStatus=2` — and the unit
+wants `RESTART=on-failure` with a backoff for the 1s, most likely of which is BlueZ not
+being up yet. Also set `KillSignal=SIGTERM` (the default) and leave `KillMode` alone; the
+signal handler needs to run, and `SIGKILL` would skip every one of the three stop paths
+except de-energization by power removal.
+
+### 3. `android/`
+
+Not started. The wire protocol (`ARCHITECTURE.md` section 5) and the transport (SPP,
+confirmed) are both settled, so the connection layer can be written against a Pi running
+`kind = "spp"` — or, before that exists, against `kind = "tcp"` over WiFi, which speaks the
+identical protocol. Developing the app against TCP first is worth it for the same reason it
+was worth it on the Pi side.
 
 ---
 
@@ -188,6 +209,86 @@ lifetime — a hardware fault should require a human, not a reconnect.
 but nothing has verified it. Treat step 4 of the bring-up order (`ARCHITECTURE.md` section
 9) as genuinely unproven, and keep the wheels off the ground.
 
+**Telemetry's change signature deliberately excludes `ack` and `up`.** It is
+`(applied.left, applied.right, err)` and nothing else. Both excluded fields move on every
+heartbeat, so adding either turns 2Hz telemetry into 10Hz telemetry — the whole link
+saturated with frames the app already knows about. If a change frame seems to be missing,
+the fix is almost certainly in `GateReason`, not in the signature.
+`test_a_new_ack_alone_does_not_publish_a_frame` guards this.
+
+**Telemetry polls the governor; the governor does not call back into telemetry.** That
+keeps the dependency pointing `telemetry -> safety` like everything else, and it costs
+nothing because the governor is a ticking machine — nothing it does can outrun its own
+tick, so `min(tick_interval, interval_s)` sees every change. Inverting this into a callback
+would put a telemetry reference inside the safety layer for no latency gain.
+
+**A periodic frame can be up to one poll interval late, and that is fine.** Due-ness is
+checked once per poll, so the effective rate is ~1.92Hz rather than exactly 2Hz. Do not add
+deadline-carry arithmetic to `_is_due` to "fix" the drift; it is a status feed. What this
+does mean is that **a test asserting an exact frame count over a fixed window is
+phase-dependent and will fail on float accumulation** — this already cost one debugging
+round. Assert the interval between consecutive frames instead, which is what
+`test_periodic_frames_land_one_period_apart` does.
+
+**`TelemetryPublisher.tick()` returns `None` when no client is attached,** rather than a
+frame that gets dropped by the caller. Marking a frame as sent when nothing received it
+would eat the immediate on-connect frame that the *next* client is owed, leaving a freshly
+connected app blank for up to a full period.
+
+**`ack` comes from `governor.seq`, not `SeqTracker.last`.** The two agree for every
+numbered frame — the session only calls `gov.command` for frames the tracker accepted — and
+taking it from the governor keeps `telemetry.py` to a single dependency. An earlier draft of
+this file said to use the tracker; the governor already exposes `seq` for exactly this, so
+that instruction was the redundant one.
+
+**`Connection` is imported into `telemetry.py` under `TYPE_CHECKING` only.** Telemetry
+needs somewhere to put bytes, not a transport, and keeping the import out of the runtime
+graph is what stops this module from quietly acquiring a dependency on a link backend.
+`session.py` does the same.
+
+**`DriveSession.on_line` calls `gov.tick()` itself, and that is an addition to the
+governor's periodic tick, never a replacement.** It exists so a command actuates on arrival
+instead of up to 20ms later. Deleting it costs latency; deleting the *periodic* tick breaks
+the watchdog and dead-time entirely (see the two entries above on ticking). Extra ticks are
+safe because `SideGovernor.evaluate` cannot return a change a gate would have refused.
+
+**A latched fault does not exit the process.** `emergency_stop` leaves the governor ticking
+and returning early, so the car sits stopped and telemetry keeps reporting the fault in
+`err`. This is deliberate: exiting would let systemd restart the service, and a restart
+clears the latch — which is exactly what "a hardware fault should require a human" forbids.
+Do not "fix" this by raising from the governor.
+
+**`_supervise` cancels every task and gathers before inspecting results.** The gather is
+what runs `SafetyGovernor.run`'s `finally`, which is what stops the car. Anything that
+returns or raises before that gather completes skips the stop. This is also why the
+supervisor does not use `asyncio.TaskGroup`: the group's own cancellation semantics make the
+ordering between "sibling died" and "our finally ran" much harder to see, and this is not a
+place to be clever.
+
+**Three separate things de-energize the relays on the way out, on purpose**
+(`SafetyGovernor.run`'s `finally`, `DriveController.close` in `_serve`'s `finally`, and an
+`atexit` hook on `bank.all_off`). They are redundant by design, not by accident. The
+`atexit` hook is safe after `close()` because `RelayBank.all_off` swallows write failures
+internally — verify that still holds before touching either.
+
+**Telemetry can miss an `err` transient shorter than one poll; it cannot miss an applied
+state.** The governor and the publisher are independent 20ms tasks, so a gate reason that
+lasts a single tick (the one-tick `dead_time` that precedes a `dwell`, for instance) may
+never be sampled. That is fine — `err` is advisory and telemetry samples state rather than
+logging events. The *applied* state is never missed, because dwell guarantees every relay
+state persists ≥80ms, which is four polls. Do not add an event queue to close the `err` gap.
+
+**Hand-testing with a fixed `seq` looks like a broken watchdog.** A shell loop sending the
+same `{"t":"drive","l":1,"r":-1,"seq":1}` forever drives for 500ms and then stops: every
+frame after the first is a duplicate, `SeqTracker` rejects it as stale, and a rejected frame
+is not a heartbeat. This is correct, and it caught out the first version of the README
+example. Either omit `seq` — unnumbered frames are always accepted — or increment it.
+
+**Do not develop against `0.0.0.0:9999` if something else on the machine wants it.**
+`car.toml` ships that way for the Pi. For local work, copy it, set
+`host = "127.0.0.1"` and a high port, and pass `--config`; `*.local.toml` is gitignored for
+exactly this. `RPICAR_CONFIG` also works.
+
 ---
 
 ## Open questions for the owner
@@ -195,15 +296,15 @@ but nothing has verified it. Treat step 4 of the bring-up order (`ARCHITECTURE.m
 Do not guess these; they change hardware sizing and the Android connection layer. They are
 also listed in `ARCHITECTURE.md` section 10.
 
-1. **Transport was chosen without sign-off.** SPP/RFCOMM is the right default for an
-   Android-only auto-connecting app, but it was decided unilaterally when the owner
-   skipped the question. Confirm before writing the app's connection layer — after that
-   it is expensive to change.
-2. **Relay module channel count.** Everything assumes **4 channels, active-low**, two per
+1. **Relay module channel count.** Everything assumes **4 channels, active-low**, two per
    side. `config/car.toml` and the truth table both depend on it. Asked, not yet answered.
-3. **Battery chemistry.** "Lithium AA" is either 1.5V L91 primaries (4S = 6V) or 3.7V
+2. **Battery chemistry.** "Lithium AA" is either 1.5V L91 primaries (4S = 6V) or 3.7V
    14500 Li-ion (4S = 14.8V). Blocks sizing the relay coil rail and the Pi's regulator.
-4. **No battery telemetry in v1.** The `state` frame has room; the Pi has no ADC.
+3. **No battery telemetry in v1.** The `state` frame has room; the Pi has no ADC.
+
+**Settled — do not reopen:** the transport. SPP/RFCOMM was confirmed by the owner on
+2026-07-29 (ARCHITECTURE.md §4). Build `transport/spp.py` and the Android connection layer
+against it.
 
 ## Context on the owner
 

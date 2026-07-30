@@ -11,7 +11,7 @@ Two deliverables:
 
 | Path | What | Status |
 |---|---|---|
-| `pi/` | Python control service for the Pi | Core done, link layer in progress |
+| `pi/` | Python control service for the Pi | Runs over TCP; Bluetooth transport not built |
 | `android/` | Android controller app | Not started (phase 2) |
 
 ## Documentation
@@ -31,13 +31,35 @@ GPIO backend and the `tcp` transport selected, so nothing touches real pins or B
 cd pi
 python3 -m venv .venv                  # Python 3.11+
 .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest -q          # 122 passed
+.venv/bin/python -m pytest -q          # 177 passed
 .venv/bin/python -m ruff check .
 .venv/bin/python -m ruff format --check .
 ```
 
 Those three should be clean before you start work. The test suite runs against the mock
 GPIO backend with an injected clock, so it is deterministic and takes well under a second.
+
+### Running the service
+
+```bash
+.venv/bin/python -m rpicar             # or: .venv/bin/rpicar
+```
+
+It listens on `0.0.0.0:9999` and logs every relay transition. Drive it with anything
+line-oriented — one JSON object per line, at 10 Hz:
+
+```bash
+while :; do echo '{"t":"drive","l":1,"r":-1}'; sleep 0.1; done | nc 127.0.0.1 9999
+```
+
+That spins the car in place, and `state` frames come back at 2 Hz. Stop with Ctrl-C; the
+relays are de-energized on the way out. `--config PATH` selects a different `car.toml` and
+`--log-level DEBUG` logs every frame — at 10 Hz, not something to leave on.
+
+Note the omitted `seq`. It is optional, and an unnumbered frame is always accepted. A
+hand-written loop that sends a *fixed* `seq` will drive for 500 ms and then stop, because
+every frame after the first is a duplicate — rejected as stale, and a rejected frame is not
+a heartbeat. The real app increments it; see ARCHITECTURE.md §5.
 
 Hardware and Bluetooth support are optional extras, deliberately not hard dependencies —
 `.[hw]` pulls in `lgpio` (Pi only), `.[spp]` pulls in `dbus-next`.
@@ -200,9 +222,9 @@ Three things that will bite you, in full in ARCHITECTURE.md §2:
 
 Blocking, and listed in ARCHITECTURE.md §10:
 
-1. **Transport** — SPP/RFCOMM was chosen unilaterally. Right default for Android-only
-   auto-connect, but confirm before the app's connection layer is written; after that it
-   gets expensive to change. (iOS is impossible with SPP — an accepted trade.)
-2. **Relay channel count** — everything assumes 4, active-low, two per side.
-3. **Battery chemistry** — "lithium AA" is either 1.5 V L91 primaries (4S = 6 V) or 3.7 V
+1. **Relay channel count** — everything assumes 4, active-low, two per side.
+2. **Battery chemistry** — "lithium AA" is either 1.5 V L91 primaries (4S = 6 V) or 3.7 V
    14500 Li-ion (4S = 14.8 V). Blocks sizing the coil rail and the Pi's regulator.
+
+Settled: the transport is **SPP/RFCOMM**, confirmed 2026-07-29. (iOS is impossible with
+SPP — an accepted trade; the app is Android-only.)
