@@ -166,12 +166,14 @@ class TcpConfig:
 @dataclass(frozen=True, slots=True)
 class SppConfig:
     channel: int
+    require_authentication: bool
 
     @classmethod
     def _parse(cls, table: Mapping[str, Any]) -> SppConfig:
         return cls(
             # RFCOMM server channels are 1-30.
             channel=_int_value(table, "channel", "transport.spp", minimum=1, maximum=30),
+            require_authentication=_bool_value(table, "require_authentication", "transport.spp"),
         )
 
 

@@ -19,6 +19,11 @@ port = 9999
 [transport.spp]
 # RFCOMM channel published in the SDP record. 1 is conventional for SPP.
 channel = 1
+# Refuse a client that has not bonded. Bonding is the only access control on
+# this link -- nothing above the transport authenticates anything -- so leave
+# this true outside of bring-up. Setting it false lets any device in range
+# drive the car. See ARCHITECTURE.md section 4.1.
+require_authentication = true
 
 [gpio]
 # "mock" records transitions in memory, "lgpio" drives real pins.

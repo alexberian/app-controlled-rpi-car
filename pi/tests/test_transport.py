@@ -19,17 +19,17 @@ import socket
 import struct
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import pytest
 
-from conftest import Rig
+from conftest import RecordingSession, Rig
 from rpicar.config import TcpConfig, TelemetryConfig
 from rpicar.drive import SideState
 from rpicar.protocol import MAX_LINE_BYTES, decode_line
 from rpicar.session import DriveSession
 from rpicar.telemetry import TelemetryPublisher
-from rpicar.transport import Connection, TcpTransport, TransportError
+from rpicar.transport import TcpTransport, TransportError
 
 # Every await in here is on loopback against a service in the same event loop,
 # so anything that has not happened within a second is a hang, not slowness.
@@ -39,29 +39,6 @@ TIMEOUT_S = 1.0
 # --------------------------------------------------------------------------
 # harness
 # --------------------------------------------------------------------------
-
-
-@dataclass
-class RecordingSession:
-    """A session that only remembers what it was told."""
-
-    lines: list[bytes] = field(default_factory=list)
-    connects: list[Connection] = field(default_factory=list)
-    disconnects: list[str] = field(default_factory=list)
-    # Whether the connection was still open at the moment we were told it had
-    # ended. ARCHITECTURE.md 6.2 requires that it is -- the stop has to happen
-    # before the teardown, not after it.
-    open_at_disconnect: list[bool] = field(default_factory=list)
-
-    def on_connect(self, connection: Connection) -> None:
-        self.connects.append(connection)
-
-    def on_line(self, line: bytes) -> None:
-        self.lines.append(line)
-
-    def on_disconnect(self, reason: str) -> None:
-        self.disconnects.append(reason)
-        self.open_at_disconnect.append(not self.connects[-1].closed)
 
 
 def drive_session(rig: Rig) -> DriveSession:

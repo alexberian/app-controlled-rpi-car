@@ -11,7 +11,7 @@ Two deliverables:
 
 | Path | What | Status |
 |---|---|---|
-| `pi/` | Python control service for the Pi | Runs over TCP; Bluetooth transport not built |
+| `pi/` | Python control service for the Pi | Drivable over Bluetooth and TCP; runs as a systemd service |
 | `android/` | Android controller app | Not started (phase 2) |
 
 ## Documentation
@@ -31,7 +31,7 @@ GPIO backend and the `tcp` transport selected, so nothing touches real pins or B
 cd pi
 python3 -m venv .venv                  # Python 3.11+
 .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest -q          # 177 passed
+.venv/bin/python -m pytest -q          # 204 passed
 .venv/bin/python -m ruff check .
 .venv/bin/python -m ruff format --check .
 ```
@@ -61,8 +61,70 @@ hand-written loop that sends a *fixed* `seq` will drive for 500 ms and then stop
 every frame after the first is a duplicate — rejected as stale, and a rejected frame is not
 a heartbeat. The real app increments it; see ARCHITECTURE.md §5.
 
-Hardware and Bluetooth support are optional extras, deliberately not hard dependencies —
-`.[hw]` pulls in `lgpio` (Pi only), `.[spp]` pulls in `dbus-next`.
+Hardware support is an optional extra, deliberately not a hard dependency — `.[hw]` pulls in
+`lgpio`, which is Pi-only. `.[spp]` pulls in `dbus-next` for the Bluetooth transport; it is
+also in `.[dev]`, because the SPP tests fake BlueZ but still import the module.
+
+### Running it over Bluetooth
+
+On the Pi. Pair the phone once — this is also what sets the adapter alias from `car.name`,
+which is the name the app matches a bonded device on:
+
+```bash
+./scripts/setup_bluetooth.sh            # 180s pairing window, then discoverable off
+```
+
+Then run the service with a config that selects the Bluetooth transport. `car.toml` ships
+`kind = "tcp"` deliberately (prove TCP first — see the bring-up order), so keep a local
+override; `*.local.toml` is gitignored:
+
+```bash
+sed 's/^kind = "tcp"/kind = "spp"/' config/car.toml > config/spp.local.toml
+.venv/bin/python -m rpicar --config config/spp.local.toml
+```
+
+It publishes an SPP record on RFCOMM channel 1 (UUID `1101`) and takes one client at a
+time. Nothing above the transport changes between the two — switching `kind` is the whole
+integration. Confirm the record from another machine with
+`sdptool search --bdaddr <pi-addr> SP`; `sdptool browse local` on the Pi shows nothing even
+when it is working, because it needs bluetoothd's compat mode.
+
+**Pairing is the access control.** `require_authentication = true` means an unbonded device
+is refused by BlueZ before the service sees it. Nothing above the transport authenticates
+anything, so turn it off only for bring-up, and knowingly.
+
+### Installing it as a service
+
+On the Pi, from the checkout, as the user the service will run as — **not** as root, since
+the venv lives in the checkout and `sudo` is used only for the three steps that need it:
+
+```bash
+./scripts/install.sh          # venv, /etc/rpicar/car.toml, unit; enable at boot
+./scripts/install.sh --now    # ... and start it
+./scripts/install.sh --uninstall
+```
+
+Enabling without starting is the default: `--now` starts a service that drives relays, and
+that is not a decision to make while your hands are in the wiring. Re-running the script is
+safe — it reuses the venv, re-renders the unit, and restarts.
+
+```bash
+systemctl status rpicar
+journalctl -u rpicar -f
+sudo systemctl edit rpicar        # drop-in overrides; these survive a reinstall
+```
+
+**The service reads `/etc/rpicar/car.toml`**, which `install.sh` seeds from
+`config/car.toml` and thereafter leaves alone (`--replace-config` overrides). So pass
+`--config config/spp.local.toml` on the first install to get a Bluetooth service, or edit
+the installed copy afterwards. Editing the checkout copy changes nothing.
+
+The unit is generated from `systemd/rpicar.service`, which is a template — edit it there and
+re-run `install.sh`. Its restart policy leans on the service's exit codes: **2** is a bad
+config and is never retried, **1** is a runtime failure (BlueZ not up yet, port already
+bound) and is retried ten times over five minutes, **0** follows a signal and is a clean
+stop. `systemctl stop` sends SIGTERM, the handler runs, and the relays are de-energized on
+the way out.
 
 ## How it fits together
 
@@ -102,18 +164,19 @@ one is wrong even if it fixes something else.
 
 Do not develop against real hardware. ARCHITECTURE.md §9:
 
-1. `mock` backend + `tcp` transport, on the dev machine
-2. `mock` + `tcp` on the Pi — proves deployment and the service unit
-3. `mock` + `spp` on the Pi — proves BlueZ and pairing, with the motors electrically
+1. ✅ `mock` backend + `tcp` transport, on the dev machine
+2. ✅ `mock` + `tcp` on the Pi — proves deployment
+3. ✅ `mock` + `spp` on the Pi — proves BlueZ and pairing, with the motors electrically
    incapable of moving
 4. `lgpio` backend, wheels off the ground, hand on the battery disconnect
 5. Wheels down
 
-Step 3 is where the pain is, and a mock backend makes a bug there cost a debugging session
-instead of a wall.
+Steps 1–3 are done. Step 3 was expected to be where the pain is and it was; doing it against
+the mock backend meant the bugs cost a debugging session instead of a wall.
 
 > `lgpio_backend.py` is written against the lgpio API but **has never run on real
-> hardware.** Treat step 4 as genuinely unproven.
+> hardware.** Treat step 4 as genuinely unproven, and note that step 3 says nothing about
+> it — every relay transition so far has been recorded by the mock backend, not switched.
 
 ## Configuration
 
@@ -226,5 +289,5 @@ Blocking, and listed in ARCHITECTURE.md §10:
 2. **Battery chemistry** — "lithium AA" is either 1.5 V L91 primaries (4S = 6 V) or 3.7 V
    14500 Li-ion (4S = 14.8 V). Blocks sizing the coil rail and the Pi's regulator.
 
-Settled: the transport is **SPP/RFCOMM**, confirmed 2026-07-29. (iOS is impossible with
-SPP — an accepted trade; the app is Android-only.)
+Settled: the transport is **SPP/RFCOMM**, confirmed 2026-07-29 and now built and proven on
+hardware. (iOS is impossible with SPP — an accepted trade; the app is Android-only.)

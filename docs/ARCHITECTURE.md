@@ -176,22 +176,52 @@ development machine without touching BlueZ. Bring up TCP first, always.
 
 ### 4.1 BlueZ specifics
 
-Python speaks RFCOMM natively:
+**BlueZ owns the listening socket. The service never binds one.** Registering an
+external profile with `org.bluez.ProfileManager1.RegisterProfile` (UUID 1101,
+`Role: server`, `Channel: 1`) makes bluetoothd do three things at once: publish the SDP
+record, bind and listen on the RFCOMM channel, and hand each accepted connection back to
+us. So the service implements `org.bluez.Profile1` and receives connections as a Unix
+file descriptor via `NewConnection(device, fd, properties)`; it wraps that descriptor in
+an asyncio stream pair and everything above the transport is unchanged.
 
-```python
-socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
-```
+This corrects an earlier version of this section, which had the service bind its own
+`AF_BLUETOOTH` socket and treat `RegisterProfile` as an SDP-record call only. Measured on
+BlueZ 5.66 / Pi OS Bookworm, three configurations behave as follows:
 
-But a raw bound socket publishes **no SDP record**, and Android's
-`createRfcommSocketToServiceRecord` does an SDP lookup to find the channel. So the
-service must also register an SPP record via D-Bus
-`org.bluez.ProfileManager1.RegisterProfile` (UUID 1101, `Role: server`, `Channel: 1`).
+| Configuration | SDP record | Incoming connection |
+|---|---|---|
+| Raw `AF_BLUETOOTH` bind only | **none** — Android cannot find the channel | delivered to `accept()` |
+| `RegisterProfile` only | published | delivered to `Profile1.NewConnection` |
+| Both, same channel | published | **delivered to neither** — the client times out |
+
+The third row is why the old design could not work: the kernel permits the second bind on
+the channel rather than returning `EADDRINUSE`, so the mistake produces a service that
+registers cleanly, advertises correctly, and then silently answers nobody. Only the middle
+row satisfies both requirements, and it is the one implemented.
+
+Two consequences worth knowing:
+
+- The bus connection must be opened with **unix-fd passing negotiated**. Without it the
+  descriptor in `NewConnection` arrives as `None` and nothing else looks wrong.
+- The received descriptor belongs to the service. `dbus-next` does not close descriptors it
+  hands over, so every path out of the handler — including a refusal — has to close it or
+  leak one per connection attempt.
+
 Do not reach for the deprecated `sdptool add SP` — it requires bluetoothd's compat mode
-and is a dead end on current Pi OS.
+and is a dead end on current Pi OS. Note also that `sdptool browse local` needs that same
+compat mode, so it reports nothing even when the record is live; query the adapter from
+another machine (`sdptool search --bdaddr <addr> SP`) to see the truth.
+
+**Access control is the bond.** `RequireAuthentication` on the profile is the only thing
+standing between the car and any device in radio range — nothing above the transport
+authenticates anything — so it is on by default and configurable only so that bring-up can
+turn it off deliberately (`transport.spp.require_authentication`). An unbonded peer is
+refused by BlueZ before the service ever sees it.
 
 Pairing needs a `NoInputNoOutput` agent registered so bonding is Just Works; the adapter
-must be `Pairable` and, for first-time setup only, `Discoverable`. Setup lives in
-`scripts/setup_bluetooth.sh`.
+must be `Pairable` and, for first-time setup only, `Discoverable`. None of that is the
+service's job — it is one-time deployment setup, and a car that stays discoverable while
+driving is a car anyone can enumerate. Setup lives in `scripts/setup_bluetooth.sh`.
 
 ---
 

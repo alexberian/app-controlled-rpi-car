@@ -39,7 +39,15 @@ def create_transport(config: TransportConfig) -> Transport:
     if config.kind == "tcp":
         return TcpTransport(config.tcp)
     if config.kind == "spp":
-        from .spp import SppTransport
+        try:
+            from .spp import SppTransport
+        except ModuleNotFoundError as exc:
+            # The `spp` extra is not installed. A bare ModuleNotFoundError here
+            # reads as a packaging bug; this reads as the install step it is.
+            raise TransportError(
+                f"transport.kind is 'spp' but its dependencies are missing ({exc.name}). "
+                "Install them with: pip install -e '.[spp]'"
+            ) from exc
 
         return SppTransport(config.spp)
     # config.py restricts this to the known set, so reaching here means the two

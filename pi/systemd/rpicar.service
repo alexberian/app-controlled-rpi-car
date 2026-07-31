@@ -1,0 +1,86 @@
+# rpi-car drive service.
+#
+# This file is a TEMPLATE. Its placeholders are substituted by
+# scripts/install.sh, which writes the result to
+# /etc/systemd/system/rpicar.service -- and which refuses to install a file
+# with any placeholder left in it, comments included. Edit it here
+# and re-run install.sh -- edits to the installed copy are lost on the next
+# install. For local changes that should survive one, use a drop-in:
+# `sudo systemctl edit rpicar`.
+
+[Unit]
+Description=rpi-car relay drive service
+Documentation=https://github.com/alexberian/app-controlled-rpi-car
+
+# The spp transport registers an org.bluez.Profile1 with bluetoothd, and doing
+# that before bluetoothd owns its bus name fails. That failure is recoverable
+# -- exit 1, restarted below -- but ordering costs nothing and saves the cycle.
+# Wants= rather than Requires= because the tcp transport does not care, and a
+# car that refuses to start over WiFi because the radio is missing is worse
+# than one that starts without Bluetooth.
+After=bluetooth.service network.target
+Wants=bluetooth.service
+
+# systemd 252 (Bookworm) has no RestartSteps=/RestartMaxDelaySec=, so the
+# backoff is a flat RestartSec= with a start limit on top: ten tries in five
+# minutes, then the unit stays failed instead of spinning. Long enough to
+# outlast a slow bluetoothd, short enough that a genuinely broken install shows
+# up in `systemctl status` rather than hiding in a restart loop.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=exec
+User=@USER@
+
+# /dev/gpiochip0 is root:gpio 0660, so the lgpio backend needs `gpio`.
+# `bluetooth` is belt and braces: Debian's /etc/dbus-1/system.d/bluetooth.conf
+# currently ends with a default-context <allow send_destination="org.bluez"/>,
+# so any local uid can call RegisterProfile and the group is not needed today.
+# Upstream BlueZ's own copy of that file denies by default, so a package
+# upgrade that restores it would silently break SPP for a user outside the
+# group. install.sh checks both groups exist -- a missing one is a 216/GROUP
+# failure at start, not a warning.
+SupplementaryGroups=gpio bluetooth
+
+WorkingDirectory=@WORKDIR@
+ExecStart=@EXEC@ --config @CONFIG@ --log-level INFO
+Environment=PYTHONUNBUFFERED=1
+SyslogIdentifier=rpicar
+
+# The exit codes are load-bearing (see __main__.py): 0 after a signal, 1 for a
+# runtime failure, 2 for a bad config. Restarting will never fix a 2 -- it is a
+# typo in car.toml -- so the unit fails and stays failed, which is the only way
+# anybody finds out. 1 is most often bluetoothd not being up yet, or the tcp
+# port already bound, and both are worth retrying.
+Restart=on-failure
+RestartSec=2
+RestartPreventExitStatus=2
+
+# The stop path is the safety-critical one (ARCHITECTURE.md 6.6). SIGTERM is
+# the default and is exactly what the service installs a handler for; KillMode
+# is deliberately left at control-group. SIGKILL would skip all three
+# de-energization paths at once, and is survivable only because releasing the
+# GPIO lines floats them and an active-low board reads a float as coil-off --
+# that is a backstop, not the plan. The clean path normally takes milliseconds,
+# so ten seconds is pure slack.
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+# A latched hardware fault deliberately does NOT exit the process: the car sits
+# stopped and keeps reporting the fault in `err`. That is what makes Restart=
+# above safe to have. Do not "fix" the governor to raise instead -- it would
+# turn "a hardware fault requires a human" into "a hardware fault requires two
+# seconds".
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+RestrictSUIDSGID=yes
+# Two that are off on purpose: ProtectHome=, because the checkout and its venv
+# live in the service user's home; and DevicePolicy=closed, because it hides
+# /dev/gpiochip0 and the lgpio backend then fails at open() with a message that
+# blames the hardware.
+
+[Install]
+WantedBy=multi-user.target

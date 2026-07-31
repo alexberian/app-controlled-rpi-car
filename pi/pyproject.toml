@@ -11,7 +11,11 @@ dependencies = []
 hw = ["lgpio>=0.2.2.0"]
 # Pure-python asyncio D-Bus client, used to publish the SPP SDP record.
 spp = ["dbus-next>=0.2.3"]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.6"]
+# dbus-next is pure python and needs no adapter, so it belongs here too: the
+# spp transport's tests fake BlueZ but still import the module under test, and a
+# suite whose size depends on which extras you installed is a suite nobody
+# trusts the count of.
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.6", "dbus-next>=0.2.3"]
 
 [project.scripts]
 rpicar = "rpicar.__main__:main"
@@ -30,6 +34,14 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
+[tool.ruff.lint.per-file-ignores]
+# The quoted annotations on org.bluez.Profile1's methods are D-Bus type
+# signatures, not forward references -- dbus-next reads them to build the
+# interface. Ruff cannot tell the difference, so it wants to unquote them
+# (UP037), cannot resolve them as names (F821), and cannot parse "a{sv}" as a
+# type (F722). Unquoting any of them breaks registration at import time.
+"src/rpicar/transport/spp.py" = ["UP037", "F821", "F722"]
+
 [tool.ruff.lint.isort]
 # conftest is imported by name from the tests directory, which pytest puts on
 # sys.path. Without this, isort files it under third-party.
@@ -37,4 +49,11 @@ known-first-party = ["rpicar", "conftest"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    # dbus-next builds its D-Bus interfaces with typing.no_type_check_decorator,
+    # which Python 3.13 deprecates. It fires at import time, so with -W error it
+    # takes out collection of the whole spp module. Not ours to fix, and not
+    # worth weakening `error` for everything else.
+    "ignore:'typing.no_type_check_decorator' is deprecated:DeprecationWarning",
+]

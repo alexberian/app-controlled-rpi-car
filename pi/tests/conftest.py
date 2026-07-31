@@ -7,7 +7,7 @@ asserting on real elapsed time would make these tests flaky on a loaded machine
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pytest
 
@@ -67,6 +67,34 @@ class FakeConnection(Connection):
 
     def close(self) -> None:
         self._closed = True
+
+
+@dataclass
+class RecordingSession:
+    """A session that only remembers what it was told.
+
+    Shared by the TCP and SPP transport tests: both have to prove the same three
+    properties of the link layer, and the two transports differ only in where the
+    socket came from.
+    """
+
+    lines: list[bytes] = field(default_factory=list)
+    connects: list[Connection] = field(default_factory=list)
+    disconnects: list[str] = field(default_factory=list)
+    # Whether the connection was still open at the moment we were told it had
+    # ended. ARCHITECTURE.md 6.2 requires that it is -- the stop has to happen
+    # before the teardown, not after it.
+    open_at_disconnect: list[bool] = field(default_factory=list)
+
+    def on_connect(self, connection: Connection) -> None:
+        self.connects.append(connection)
+
+    def on_line(self, line: bytes) -> None:
+        self.lines.append(line)
+
+    def on_disconnect(self, reason: str) -> None:
+        self.disconnects.append(reason)
+        self.open_at_disconnect.append(not self.connects[-1].closed)
 
 
 class FakeClock:
